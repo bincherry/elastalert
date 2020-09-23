@@ -170,7 +170,10 @@ class ElastAlerter(object):
 
         remove = []
         for rule in self.rules:
-            if not self.init_rule(rule):
+            if 'is_enabled' in rule and not rule['is_enabled']:
+                self.disabled_rules.append(rule)
+                remove.append(rule)
+            elif not self.init_rule(rule):
                 remove.append(rule)
         list(map(self.rules.remove, remove))
 
@@ -652,8 +655,7 @@ class ElastAlerter(object):
 
         try:
             if rule.get('scroll_id') and self.thread_data.num_hits < self.thread_data.total_hits and should_scrolling_continue(rule):
-                if not self.run_query(rule, start, end, scroll=True):
-                    return False
+                self.run_query(rule, start, end, scroll=True)
         except RuntimeError:
             # It's possible to scroll far enough to hit max recursive depth
             pass
@@ -895,8 +897,7 @@ class ElastAlerter(object):
 
         if rule.get('aggregation_query_element'):
             if endtime - tmp_endtime == segment_size:
-                if not self.run_query(rule, tmp_endtime, endtime):
-                    return 0
+                self.run_query(rule, tmp_endtime, endtime)
                 self.thread_data.cumulative_hits += self.thread_data.num_hits
             elif total_seconds(rule['original_starttime'] - tmp_endtime) == 0:
                 rule['starttime'] = rule['original_starttime']
@@ -968,7 +969,7 @@ class ElastAlerter(object):
 
     def init_rule(self, new_rule, new=True):
         ''' Copies some necessary non-config state from an exiting rule to a new rule. '''
-        if not new:
+        if not new and self.scheduler.get_job(job_id=new_rule['name']):
             self.scheduler.remove_job(job_id=new_rule['name'])
 
         try:
@@ -1088,6 +1089,15 @@ class ElastAlerter(object):
                         elastalert_logger.info('Rule file %s is now disabled.' % (rule_file))
                         # Remove this rule if it's been disabled
                         self.rules = [rule for rule in self.rules if rule['rule_file'] != rule_file]
+                        # Stop job if is running
+                        if self.scheduler.get_job(job_id=new_rule['name']):
+                            self.scheduler.remove_job(job_id=new_rule['name'])
+                        # Append to disabled_rule
+                        for disabled_rule in self.disabled_rules:
+                            if disabled_rule['name'] == new_rule['name']:
+                                break
+                        else:
+                            self.disabled_rules.append(new_rule)
                         continue
                 except EAException as e:
                     message = 'Could not load rule %s: %s' % (rule_file, e)
@@ -1106,7 +1116,6 @@ class ElastAlerter(object):
                 # Re-enable if rule had been disabled
                 for disabled_rule in self.disabled_rules:
                     if disabled_rule['name'] == new_rule['name']:
-                        self.rules.append(disabled_rule)
                         self.disabled_rules.remove(disabled_rule)
                         break
 
